@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Ozon Seller - Безупречная автопечать (Финальный стандарт)
+// @name         Ozon Seller — печать этикеток FBS
 // @namespace    http://tampermonkey.net
-// @version      26.0
-// @description  Выводит этикетку на печать в 1 клик, не дает окну сохранения всплывать и мгновенно реанимирует кнопку Озона
+// @version      27.0
+// @description  Открывает диалог печати при создании PDF этикетки; штатную загрузку Ozon не отменяет
 // @author       AI Assistant
 // @match        https://*.ozon.ru/*
 // @match        https://ozon.ru*
@@ -11,20 +11,33 @@
 // @run-at       document-start
 // ==/UserScript==
 
-(function() {
+(function () {
     'use strict';
 
-    let isOurPrintJob = false;
+    // Защита от повторного перехвата Blob URL, который создаём для собственного iframe.
+    let isCreatingPrintBlobUrl = false;
     let lastClickedButton = null;
 
-    // Скрытый контролируемый фрейм для вызова диалога печати
+    const originalCreateObjectURL = URL.createObjectURL;
+
+    /**
+     * Загружает копию PDF в скрытый iframe и открывает системный диалог печати.
+     * Исходную обработку PDF на стороне Ozon скрипт не отменяет.
+     */
     function printBlobPdf(blob) {
+        let blobUrl;
+
         try {
-            isOurPrintJob = true;
-            const blobUrl = URL.createObjectURL(blob);
-            isOurPrintJob = false;
+            // Создаём URL через оригинальный метод, чтобы не запускать перехват повторно.
+            isCreatingPrintBlobUrl = true;
+            try {
+                blobUrl = originalCreateObjectURL.call(URL, blob);
+            } finally {
+                isCreatingPrintBlobUrl = false;
+            }
 
             let iframe = document.getElementById('ozon-direct-print-frame');
+
             if (!iframe) {
                 iframe = document.createElement('iframe');
                 iframe.id = 'ozon-direct-print-frame';
@@ -35,72 +48,92 @@
                 document.body.appendChild(iframe);
             }
 
-            iframe.src = blobUrl;
-            iframe.onload = function() {
-                setTimeout(() => {
-                    iframe.contentWindow.focus();
-                    iframe.contentWindow.print();
-                    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+            iframe.onload = function () {
+                setTimeout(function () {
+                    try {
+                        iframe.contentWindow.focus();
+                        iframe.contentWindow.print();
+                    } catch (error) {
+                        console.error('Ошибка вызова диалога печати:', error);
+                    } finally {
+                        // Сохраняем исходную задержку освобождения URL.
+                        setTimeout(function () {
+                            URL.revokeObjectURL(blobUrl);
+                        }, 1000);
+                    }
                 }, 300);
             };
-        } catch (e) {
-            console.error('Ошибка скрипта печати:', e);
+
+            iframe.src = blobUrl;
+        } catch (error) {
+            console.error('Ошибка скрипта печати:', error);
+
+            // Если URL был создан, но iframe настроить не удалось, освобождаем его.
+            if (blobUrl) {
+                URL.revokeObjectURL(blobUrl);
+            }
         }
     }
 
-    // Ловим кнопку Озона в момент нажатия, чтобы запомнить её элемент до появления спиннера
-    window.addEventListener('click', function(event) {
-        const button = event.target.closest('button');
-        if (button && (button.innerText.includes('Этикетка') || (button.title && button.title.includes('Формат')))) {
+    // Запоминаем кнопку этикетки до того, как Ozon изменит её состояние.
+    window.addEventListener('click', function (event) {
+        const target = event.target;
+        const button = target instanceof Element ? target.closest('button') : null;
+
+        if (
+            button &&
+            (
+                button.innerText.includes('Этикетка') ||
+                (button.title && button.title.includes('Формат'))
+            )
+        ) {
             lastClickedButton = button;
         }
     }, { capture: true, passive: true });
 
-    // --- ИДЕАЛЬНЫЙ СКВОЗНОЙ ПЕРЕХВАТ ОБЪЕКТА ФАЙЛА ---
-    const originalCreateObjectURL = URL.createObjectURL;
-    URL.createObjectURL = function(obj) {
-        if (obj instanceof Blob && obj.type === 'application/pdf') {
-
-            // Если запрос идет НЕ от нашего принтера — отправляем копию файла на печать
-            if (!isOurPrintJob) {
-                console.log('Скрипт перехватил реальный PDF и отправил на печать.');
-                printBlobPdf(obj);
+    // Перехватываем создание PDF Blob и отправляем его копию в скрытый iframe.
+    URL.createObjectURL = function (object) {
+        if (object instanceof Blob && object.type === 'application/pdf') {
+            if (!isCreatingPrintBlobUrl) {
+                console.log('Перехвачен PDF Blob: открываем диалог печати.');
+                printBlobPdf(object);
             }
 
-            // ТОЧЕЧНАЯ РЕАНИМАЦИЯ ИНТЕРФЕЙСА (Убираем серое состояние и спиннер)
-            // Даем Озону 100 миллисекунд завершить свой фоновый поток,
-            // а затем жестко сбрасываем блокировки, которые наложил React
-            setTimeout(() => {
-                if (lastClickedButton) {
-                    console.log('Оживляем заблокированную кнопку Озона...');
+            // Сохраняем исходное поведение Ozon: возвращаем ему штатный Blob URL.
+            // Поэтому загрузка и диалог сохранения браузера могут по-прежнему появляться.
+            setTimeout(function () {
+                if (!lastClickedButton || !lastClickedButton.isConnected) {
+                    return;
+                }
 
-                    // Убираем системные атрибуты блокировки
-                    lastClickedButton.removeAttribute('disabled');
-                    lastClickedButton.style.pointerEvents = 'auto';
-                    lastClickedButton.style.opacity = '1';
+                console.log('Восстанавливаем доступность кнопки этикетки.');
 
-                    // Если Озон вставил крутящееся колесико спиннера — стираем его из кнопки
-                    const spinner = lastClickedButton.querySelector('svg, [class*="spinner"], [class*="loading"]');
-                    if (spinner) {
-                        spinner.remove();
-                    }
+                // Оставлено намеренно для сохранения текущего поведения скрипта.
+                lastClickedButton.removeAttribute('disabled');
+                lastClickedButton.style.pointerEvents = 'auto';
+                lastClickedButton.style.opacity = '1';
 
-                    // Если Озон стер или скрыл текст кнопки, принудительно возвращаем его назад
-                    if (!lastClickedButton.innerText.includes('Этикетка')) {
-                        const textSpan = lastClickedButton.querySelector('span');
-                        if (textSpan) {
-                            textSpan.innerText = 'Этикетка и штрихкод';
-                        }
+                // Сохраняем существующую логику удаления индикатора загрузки.
+                const spinner = lastClickedButton.querySelector(
+                    'svg, [class*="spinner"], [class*="loading"]'
+                );
+
+                if (spinner) {
+                    spinner.remove();
+                }
+
+                if (!lastClickedButton.innerText.includes('Этикетка')) {
+                    const textSpan = lastClickedButton.querySelector('span');
+
+                    if (textSpan) {
+                        textSpan.innerText = 'Этикетка и штрихкод';
                     }
                 }
             }, 100);
 
-            // Отдаем Озону его РОДНОЙ, неповрежденный URL-адрес.
-            // Благодаря этому его внутренний код не выдает ошибок,
-            // а браузер тихо сохраняет файл в Загрузки в фоновом режиме, не открывая окон.
             return originalCreateObjectURL.apply(this, arguments);
         }
+
         return originalCreateObjectURL.apply(this, arguments);
     };
-
 })();
