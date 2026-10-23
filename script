@@ -14,10 +14,7 @@
 (function () {
     'use strict';
 
-    // Защита от повторного перехвата Blob URL, который создаём для собственного iframe.
-    let isCreatingPrintBlobUrl = false;
     let lastClickedButton = null;
-
     const originalCreateObjectURL = URL.createObjectURL;
 
     /**
@@ -28,13 +25,8 @@
         let blobUrl;
 
         try {
-            // Создаём URL через оригинальный метод, чтобы не запускать перехват повторно.
-            isCreatingPrintBlobUrl = true;
-            try {
-                blobUrl = originalCreateObjectURL.call(URL, blob);
-            } finally {
-                isCreatingPrintBlobUrl = false;
-            }
+            // Используем оригинальный метод: создание URL для iframe не вызывает наш перехват.
+            blobUrl = originalCreateObjectURL.call(URL, blob);
 
             let iframe = document.getElementById('ozon-direct-print-frame');
 
@@ -94,10 +86,8 @@
     // Перехватываем создание PDF Blob и отправляем его копию в скрытый iframe.
     URL.createObjectURL = function (object) {
         if (object instanceof Blob && object.type === 'application/pdf') {
-            if (!isCreatingPrintBlobUrl) {
-                console.log('Перехвачен PDF Blob: открываем диалог печати.');
-                printBlobPdf(object);
-            }
+            console.log('Перехвачен PDF Blob: открываем диалог печати.');
+            printBlobPdf(object);
 
             // Сохраняем исходное поведение Ozon: возвращаем ему штатный Blob URL.
             // Поэтому загрузка и диалог сохранения браузера могут по-прежнему появляться.
